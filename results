@@ -1,0 +1,105 @@
+import simpy
+import numpy as np
+import pandas as pd
+
+# --- RESEARCH PARAMETERS ---
+NUM_STATIONS = 5
+BASE_PROC_TIME = 1.0  # Mean Processing Time
+SIGMA = 0.1           # Random Noise (Fixed + Noise)
+SIM_TIME = 1000
+WIP_CAP_K = 10        # Total WIP Cap (K)
+KANBAN_CARDS = WIP_CAP_K // NUM_STATIONS # 2 cards per station
+
+class ResearchFactory:
+    def __init__(self, env, mode):
+        self.env = env
+        self.mode = mode
+        self.stations = [simpy.Resource(env, capacity=1) for _ in range(NUM_STATIONS)]
+        self.results = []
+        self.stockouts = 0  # Count of parts delayed by WIP Cap
+        
+        if mode == "KANBAN":
+            self.cards = [simpy.Container(env, init=KANBAN_CARDS, capacity=KANBAN_CARDS) for _ in range(NUM_STATIONS)]
+        else:
+            self.cards = simpy.Container(env, init=WIP_CAP_K, capacity=WIP_CAP_K)
+
+    def process_part(self, p_id, entry_time):
+        # Check for Stockout/Delay: If no cards available immediately
+        if (self.mode == "CONWIP" and self.cards.level == 0) or \
+           (self.mode == "KANBAN" and self.cards[0].level == 0):
+            self.stockouts += 1
+
+        # Logic to acquire card
+        if self.mode == "KANBAN":
+            yield self.cards[0].get(1)
+        else:
+            yield self.cards.get(1)
+        
+        # Start Clock for FLOW TIME (once the card is acquired)
+        start_prod_time = self.env.now
+        
+        for i in range(NUM_STATIONS):
+            with self.stations[i].request() as req:
+                yield req
+                # PROCESSING TIME DISTRIBUTION: Fixed (BASE) + Random Noise
+                duration = max(0.1, np.random.normal(BASE_PROC_TIME, SIGMA))
+                yield self.env.timeout(duration)
+                
+                if self.mode == "KANBAN":
+                    if i < NUM_STATIONS - 1: yield self.cards[i+1].get(1)
+                    self.cards[i].put(1)
+
+        if self.mode == "CONWIP": yield self.cards.put(1)
+        
+        # Store results
+        self.results.append({
+            'lead_time': self.env.now - entry_time,
+            'flow_time': self.env.now - start_prod_time
+        })
+
+def run_experiment(scenario, mode):
+    env = simpy.Environment()
+    factory = ResearchFactory(env, mode)
+    df_demand = pd.read_csv("demand_scenarios.csv")
+    
+    def generator(env):
+        for i, row in df_demand.iterrows():
+            rate = row[scenario]
+            if rate > 0:
+                yield env.timeout(1.0 / rate) # Arrival Rate (Demand)
+                env.process(factory.process_part(i, env.now))
+
+    env.process(generator(env))
+    env.run(until=SIM_TIME)
+    
+    # CALCULATIONS
+    res = pd.DataFrame(factory.results)
+    
+    # Calculate Avg Flow Time specifically
+    avg_flow = res['flow_time'].mean() if not res.empty else 0
+    throughput = len(res) / SIM_TIME
+    
+    # Note: Avg WIP still relies on Lead Time (Little's Law for system WIP)
+    # but we will only report Flow Time as requested.
+    avg_lt = res['lead_time'].mean() if not res.empty else 0
+
+    return {
+        "Mode": mode,
+        "Scenario": scenario,
+        "WIP Cap (K)": WIP_CAP_K,
+        "Proc Dist": f"Fixed(1)+N(0,{SIGMA})",
+        "Avg Flow Time": round(avg_flow, 2), # Swapped Lead Time for Flow Time
+        "Throughput": round(throughput, 3),
+        "Avg WIP": round(throughput * avg_lt, 2),
+        "Stockouts": factory.stockouts,
+        "Fill Rate (%)": round((len(res[res['lead_time'] < 10]) / len(df_demand)) * 100, 1)
+    }
+
+# Execute
+final_report = []
+for sc in ["stable", "spike", "oscillating"]:
+    for md in ["KANBAN", "CONWIP"]:
+        final_report.append(run_experiment(sc, md))
+
+# Output Table
+print(pd.DataFrame(final_report).to_string())
