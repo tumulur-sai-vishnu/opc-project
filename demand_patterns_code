@@ -1,0 +1,40 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def generate_demand_data(total_time=1000, dt=1):
+    """
+    Generates three scenarios of demand (arrivals per time unit).
+    """
+    time_steps = np.arange(0, total_time, dt)
+    df = pd.DataFrame({'time': time_steps})
+
+    # 1. STABLE DEMAND (Baseline)
+    # Average 0.8 units per time unit with minor noise
+    df['stable'] = 0.8 + np.random.normal(0, 0.05, len(time_steps))
+
+    # 2. STEP-UP SPIKE (Festival/Shock)
+    # Starts at 0.6, jumps to 1.8 (300% increase) halfway through
+    df['spike'] = 0.6
+    df.loc[df['time'] > total_time/2, 'spike'] = 1.8
+    df['spike'] += np.random.normal(0, 0.05, len(time_steps))
+
+    # 3. OSCILLATING (Seasonal/Weekly)
+    # Swings between 0.4 and 1.4
+    df['oscillating'] = 0.9 + 0.5 * np.sin(2 * np.pi * df['time'] / 100)
+    df['oscillating'] += np.random.normal(0, 0.05, len(time_steps))
+
+    # Clip values so demand is never negative
+    for col in ['stable', 'spike', 'oscillating']:
+        df[col] = df[col].clip(lower=0)
+
+    return df
+
+# Generate and Save
+demand_df = generate_demand_data()
+demand_df.to_csv("demand_scenarios.csv", index=False)
+
+# Quick Visualization
+demand_df.set_index('time').plot(figsize=(12, 5), title="Demand Shock Scenarios")
+plt.ylabel("Arrival Rate (Units/Hour)")
+plt.show()
